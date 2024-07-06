@@ -66,12 +66,8 @@ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 &
 ifndef SCHEDULER
 SCHEDULER := RR
 endif
-CFLAGS+=-D$(SCHEDULER) 
 
-
-
-
-
+CFLAGS+=-D $(SCHEDULER)
 
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
@@ -80,6 +76,8 @@ endif
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
 CFLAGS += -fno-pie -nopie
 endif
+
+
 
 LDFLAGS = -z max-page-size=4096
 
@@ -144,7 +142,7 @@ UPROGS=\
 	$U/_zombie\
 	$U/_schedulertest\
 	$U/_test_1\
-	$U/_test_2\
+    $U/_test_2\
 	$U/_alarmtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
@@ -169,6 +167,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 3
 endif
+
 
 QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic
 QEMUOPTS += -global virtio-mmio.force-legacy=false

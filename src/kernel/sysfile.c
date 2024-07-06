@@ -15,7 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
-
+int someyuckcounts = 0;
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -70,10 +70,11 @@ sys_dup(void)
 uint64
 sys_read(void)
 {
+  someyuckcounts++;
   struct file *f;
   int n;
   uint64 p;
-  // ct++;
+
   argaddr(1, &p);
   argint(2, &n);
   if (argfd(0, 0, &f) < 0)
@@ -538,4 +539,28 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64 sys_getreadcount(void)
+{
+  return someyuckcounts;
+}
+
+uint64 sys_sigalarm(void)
+{
+  struct proc *p = myproc();
+  argaddr(0, &(p->ticks));
+  argaddr(1, &(p->funcadr));
+  return 0;
+}
+
+uint64 sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  memmove(p->trapframe, p->pasttrapframe, PGSIZE);
+  p->currentticks = 0;
+  p->ishandler = 0;
+  kfree((void *)p->pasttrapframe);
+  p->pasttrapframe = 0;
+  return p->trapframe->a0;
 }

@@ -18,7 +18,7 @@ struct context
   uint64 s10;
   uint64 s11;
 };
-extern int ct;
+
 // Per-CPU state.
 struct cpu
 {
@@ -92,9 +92,6 @@ enum procstate
   ZOMBIE
 };
 
-// for deciding scheduling policy
-extern int flag_schd;
-
 // Per-process state
 struct proc
 {
@@ -106,6 +103,22 @@ struct proc
   int killed;           // If non-zero, have been killed
   int xstate;           // Exit status to be returned to parent's wait
   int pid;              // Process ID
+
+  // my additions
+
+  uint64 ticks;
+  uint64 currentticks;
+  uint64 funcadr;
+  uint64 ishandler;
+  struct trapframe *pasttrapframe; // store the past trap frame
+
+  // for scheduling
+  int queue;      // queue number
+  int sliceticks; // number of ticks in the current slice
+  int slicetime;  // number of ticks in the current slice
+  int flagforio;
+
+  int timeofwait;
 
   // wait_lock must be held when using this:
   struct proc *parent; // Parent process
@@ -119,24 +132,9 @@ struct proc
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-
-  // alarm init
-  int time_length;
-  int curr_ticks;
-  int check_sig;
-  uint64 handler;
-  struct trapframe *store_frame;
-
-  // for scheduling
-  uint create_time;  // creation time
-  uint running_time; // time spent on running
-  uint exit_time;    // time when the process exited
-  uint num_runs;     // number of runs
-
-  // for MLFQ
-  uint qetime;         // Entry time in the current queue
-  uint time_inside_queue[5]; // Number of ticks done in each queue
-  uint queue_no;        // Current queue number of the process
+  uint rtime;                  // How long the process ran for
+  uint ctime;                  // When was the process created
+  uint etime;                  // When did the process exited
 };
 
 extern struct proc proc[NPROC];

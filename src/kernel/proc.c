@@ -4,10 +4,7 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
-// #include <stdio.h>
 #include "defs.h"
-#define Aging_time 30
-int curr_max;
 
 struct cpu cpus[NCPU];
 
@@ -112,6 +109,7 @@ allocproc(void)
 {
   struct proc *p;
 
+  // p->pasttrapframe = NULL;
   for (p = proc; p < &proc[NPROC]; p++)
   {
     acquire(&p->lock);
@@ -124,6 +122,7 @@ allocproc(void)
       release(&p->lock);
     }
   }
+
   return 0;
 
 found:
@@ -137,6 +136,7 @@ found:
     release(&p->lock);
     return 0;
   }
+  // p->pasttrapframe = (struct trapframe *)kalloc();
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
@@ -152,32 +152,18 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
-  // sigalarm init
-  p->store_frame = (struct trapframe *)kalloc();
-  if (p->store_frame)
-  {
-    p->check_sig = 0;
-    p->check_sig = 0;
-    p->curr_ticks = 0;
-    p->handler = 0;
-  }
-  else
-  {
-    release(&p->lock);
-    return 0;
-  }
-  p->create_time = ticks;
-  p->running_time = 0;
-  p->exit_time = 0;
-  p->num_runs = 0;
-
-#ifdef MLFQ
-  p->queue_entrance_time = ticks;
-  p->current_queue_number = 0;
-  for (int i = 0; i < 5; i++)
-    p->number_of_ticks_in_queue[i] = 0;
-#endif
+  p->rtime = 0;
+  p->etime = 0;
+  p->ctime = ticks;
+  p->ticks = 0;
+  p->ishandler = 0;
+  p->currentticks = 0;
+  p->funcadr = 0;
+  p->sliceticks = 0;
+  p->queue = 0;
+  p->flagforio = 0; // 0 for not waiting for io, 1 for waiting for io
+  p->slicetime = 1;
+  p->timeofwait = 0;
   return p;
 }
 
@@ -189,8 +175,7 @@ freeproc(struct proc *p)
 {
   if (p->trapframe)
     kfree((void *)p->trapframe);
-  if (p->store_frame)
-    kfree((void *)p->store_frame);
+
   p->trapframe = 0;
   if (p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
@@ -416,7 +401,7 @@ void exit(int status)
 
   p->xstate = status;
   p->state = ZOMBIE;
-  p->exit_time = ticks;
+  p->etime = ticks;
 
   release(&wait_lock);
 
@@ -486,159 +471,9 @@ int wait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
-uint max(uint a, uint b)
-{
-  if (a > b)
-    return a;
-  else
-    return b;
-}
-
-uint min(uint a, uint b)
-{
-  if (a < b)
-    return a;
-  else
-    return b;
-}
-
-// Wait for a child process to exit and return its pid.
-// Return -1 if this process has no children.
-int waitx(uint64 addr, uint *running_time, uint *wtime)
-{
-  struct proc *np;
-  int havekids, pid;
-  struct proc *p = myproc();
-
-  acquire(&wait_lock);
-
-  for (;;)
-  {
-    // Scan through table looking for exited children.
-    havekids = 0;
-    for (np = proc; np < &proc[NPROC]; np++)
-    {
-      if (np->parent == p)
-      {
-        // make sure the child isn't still in exit() or swtch().
-        acquire(&np->lock);
-
-        havekids = 1;
-        if (np->state == ZOMBIE)
-        {
-          // Found one.
-          pid = np->pid;
-          *running_time = np->running_time;
-          *wtime = np->exit_time - np->create_time - np->running_time;
-          if (addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
-                                   sizeof(np->xstate)) < 0)
-          {
-            release(&np->lock);
-            release(&wait_lock);
-            return -1;
-          }
-          freeproc(np);
-          release(&np->lock);
-          release(&wait_lock);
-          return pid;
-        }
-        release(&np->lock);
-      }
-    }
-
-    // No point waiting if we don't have any children.
-    if (!havekids || p->killed)
-    {
-      release(&wait_lock);
-      return -1;
-    }
-
-    // Wait for a child to exit.
-    sleep(p, &wait_lock); // DOC: wait-sleep
-  }
-}
-
-#ifdef RR
-int flag_schd = 0;
-#endif
-#ifdef FCFS
-int flag_schd = 1;
-#endif
-#ifdef MLFQ
-int flag_schd = 3;
-#endif
-
-void mlfq_scheduling(struct cpu *c)
-{
-  curr_max = 4;
-
-  struct proc *p;
-  struct proc *exec_proc;
-
-  exec_proc = 0;
-  for (p = proc; p < &proc[NPROC]; p++)
-  {
-    if (p->state == RUNNABLE && p->queue_no && (ticks - p->qetime > Aging_time))
-    {
-      acquire(&p->lock);
-      printf("%d %d %d\n", ticks - 1, p->pid, p->queue_no);
-      p->time_inside_queue[p->queue_no] += (ticks - p->qetime);
-      p->queue_no--;
-      p->qetime = ticks;
-      printf("%d %d %d\n", ticks, p->pid, p->queue_no);
-      release(&p->lock);
-    }
-  }
-
-  // Selecting the process to be scheduled
-  for (p = proc; p < &proc[NPROC]; p++)
-  {
-    if (p->state == RUNNABLE)
-    {
-      if (p->queue_no == curr_max && p->qetime < exec_proc->qetime && exec_proc != 0 && p->queue_no >= curr_max)
-      {
-        exec_proc = p;
-      }
-      if (p->queue_no < curr_max && exec_proc != 0)
-      {
-        exec_proc = p;
-        curr_max = exec_proc->queue_no;
-      }
-      if (!exec_proc)
-      {
-        exec_proc = p, curr_max = exec_proc->queue_no;
-      }
-      if (exec_proc->pid >= 9 && exec_proc->pid <= 13)
-        printf("%d %d %d\n", ticks, exec_proc->pid, curr_max);
-    }
-  }
-  // Schedule the chosen process
-  if (exec_proc != 0)
-  {
-    acquire(&exec_proc->lock);
-    if (exec_proc->state == RUNNABLE)
-    {
-      exec_proc->num_runs++;
-      exec_proc->qetime = ticks;
-
-      // start executing the process
-      exec_proc->state = RUNNING;
-      c->proc = exec_proc;
-      if (exec_proc->pid >= 9 && exec_proc->pid <= 13)
-        printf("%d %d %d\n", ticks, exec_proc->pid, curr_max);
-
-      swtch(&c->context, &exec_proc->context);
-
-      // when the execution of the process is done
-      c->proc = 0;
-      exec_proc->time_inside_queue[exec_proc->queue_no] += (ticks - exec_proc->qetime);
-    }
-    release(&exec_proc->lock);
-  }
-}
-
 void scheduler(void)
 {
+  struct proc *p;
   struct cpu *c = mycpu();
 
   c->proc = 0;
@@ -646,87 +481,100 @@ void scheduler(void)
   {
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
-
-    if (flag_schd == 0)
+#ifdef RR
+    for (p = proc; p < &proc[NPROC]; p++)
     {
-      struct proc *p;
+      acquire(&p->lock);
+      if (p->state == RUNNABLE)
+      {
+        // Switch to chosen process.  It is the process's job
+        // to release its lock and then reacquire it
+        // before jumping back to us.
+        p->state = RUNNING;
+        
+        c->proc = p;
+        // procdump();
+        swtch(&c->context, &p->context);
+        c->proc = 0;
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+      }
+      release(&p->lock);
+    }
+#endif
+#ifdef FCFS
+    
+#endif
+#ifdef MLFQ
+    int minqueue = 100;
+    struct proc *temp = 0;
+
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE)
+      {
+        if (p->queue < minqueue)
+        {
+          minqueue = p->queue;
+        }
+      }
+    }
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE)
+      {
+        if (p->queue == minqueue)
+        {
+          temp = p;
+          break;
+        }
+      }
+    }
+    int someflag = 1;
+    if (temp != 0)
+    {
       for (p = proc; p < &proc[NPROC]; p++)
       {
-        acquire(&p->lock);
-        if (p->state == RUNNABLE)
+        // acquire(&p->lock);
+        if (p->state == RUNNABLE && p->flagforio == 1 && p->queue == minqueue)
         {
-          // Switch to chosen process.  It is the process's job
-          // to release its lock and then reacquire it
-          // before jumping back to us.
-          p->state = RUNNING;
-          c->proc = p;
-          swtch(&c->context, &p->context);
+          someflag = 0;
+          temp = p;
+          break;
+        }
 
-          // Process is done running for now.
-          // It should have changed its p->state before coming back.
-          c->proc = 0;
-        }
-        release(&p->lock);
       }
-    }
-    if (flag_schd == 1)
-    {
-      struct proc *p;
-      struct proc *exec_proc = 0;
-      // for locating the process with minimum creation time
-      for (p = proc; p < &proc[NPROC]; p++)
+      if (someflag == 1)
       {
-        if (p->state == RUNNABLE)
+        int maxwtime = -1;
+        struct proc * sahil=p;
+        for (p = proc; p < &proc[NPROC]; p++)
         {
-          int check;
-          if (exec_proc == 0)
+          if (p->state == RUNNABLE && p->queue == minqueue)
           {
-            check = 1;
-          }
-          else
-          {
-            check = 0;
-          }
-          if (!check)
-          {
-            check = (exec_proc->create_time > p->create_time);
-            if (exec_proc->create_time == p->create_time)
+            if (p->timeofwait > maxwtime)
             {
-              check = 1;
-            }
-            else
-            {
-              check = 0;
+              sahil=p;
+              maxwtime = p->timeofwait;
+
             }
           }
-          if (check)
-          {
-            exec_proc = p;
-          }
         }
+        temp=sahil;
       }
-      // once the process with minimum creation time is found run it
-      if (exec_proc)
-      {
-        acquire(&exec_proc->lock);
-        if (exec_proc->state == RUNNABLE)
-        {
-          c->proc = exec_proc;
-          exec_proc->state = RUNNING;
-          exec_proc->num_runs++;
-          swtch(&c->context, &exec_proc->context);
-          c->proc = 0; // when the process run is completed
-        }
-        release(&exec_proc->lock);
-      }
+
+      acquire(&temp->lock);
+      temp->state = RUNNING;
+      temp->timeofwait = 0;
+      c->proc = temp;
+      // procdump();
+      swtch(&c->context, &temp->context);
+      c->proc = 0;
+      release(&temp->lock);
     }
-    if (flag_schd == 3)
-    {
-      mlfq_scheduling(c);
-    }
+#endif
   }
 }
-
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
 // intena because intena is a property of this
@@ -870,6 +718,7 @@ void setkilled(struct proc *p)
 int killed(struct proc *p)
 {
   int k;
+
   acquire(&p->lock);
   k = p->killed;
   release(&p->lock);
@@ -910,17 +759,17 @@ int either_copyin(void *dst, int user_src, uint64 src, uint64 len)
   }
 }
 
-// used for debugging for printing a process to console
-// runned when ctrl + p is typed
-// There is no lock to prevent wedgeing a stuck machine deeper
+// Print a process listing to console.  For debugging.
+// Runs when user types ^P on console.
+// No lock to avoid wedging a stuck machine further.
 void procdump(void)
 {
   static char *states[] = {
       [UNUSED] "unused",
       [USED] "used",
-      [SLEEPING] "sleep",
+      [SLEEPING] "sleep ",
       [RUNNABLE] "runble",
-      [RUNNING] "run",
+      [RUNNING] "run   ",
       [ZOMBIE] "zombie"};
   struct proc *p;
   char *state;
@@ -934,52 +783,81 @@ void procdump(void)
       state = states[p->state];
     else
       state = "???";
-
-    int end_time = p->exit_time;
-    if (end_time == 0)
-      end_time = ticks;
-    if (flag_schd == 0)
-      printf("%d\t%s\t%d\t%d\t%d\n", p->pid, state, p->running_time, end_time - p->create_time - p->running_time, p->num_runs);
-
-    if (flag_schd == 1)
-      printf("%d\t%s\t%d\t%d\t%d\n", p->pid, state, p->running_time, end_time - p->create_time - p->running_time, p->num_runs);
-
-    if (flag_schd == 3)
+    if (p->state == RUNNING)
     {
-      int current_queue_number = p->queue_no;
-      if (p->state == ZOMBIE)
-        current_queue_number = -1;
-      printf("%d\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", p->pid, current_queue_number, state, p->running_time, end_time - p->create_time - p->running_time, p->num_runs, p->time_inside_queue[0], p->time_inside_queue[1], p->time_inside_queue[2], p->time_inside_queue[3], p->time_inside_queue[4]);
+      printf("%d %s %s %d %d", p->pid, state, p->name, p->queue, ticks);
+      printf("\n");
     }
   }
 }
 
-uint64 sys_sigalarm(void)
+// waitx
+int waitx(uint64 addr, uint *wtime, uint *rtime)
 {
-  uint64 handler;
-  argaddr(1, &handler);
-  if (handler < 0)
-    return -1;
-  int ticks;
-  argint(0, &ticks);
-  if (ticks < 0)
-    return -1;
-  myproc()->time_length = ticks;
-  myproc()->curr_ticks = 0;
-  myproc()->check_sig = 0;
-  myproc()->handler = handler;
-  return 0;
+  struct proc *np;
+  int havekids, pid;
+  struct proc *p = myproc();
+
+  acquire(&wait_lock);
+
+  for (;;)
+  {
+    // Scan through table looking for exited children.
+    havekids = 0;
+    for (np = proc; np < &proc[NPROC]; np++)
+    {
+      if (np->parent == p)
+      {
+        // make sure the child isn't still in exit() or swtch().
+        acquire(&np->lock);
+
+        havekids = 1;
+        if (np->state == ZOMBIE)
+        {
+          // Found one.
+          pid = np->pid;
+          *rtime = np->rtime;
+          *wtime = np->etime - np->ctime - np->rtime;
+          if (addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
+                                   sizeof(np->xstate)) < 0)
+          {
+            release(&np->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          freeproc(np);
+          release(&np->lock);
+          release(&wait_lock);
+          return pid;
+        }
+        release(&np->lock);
+      }
+    }
+
+    // No point waiting if we don't have any children.
+    if (!havekids || p->killed)
+    {
+      release(&wait_lock);
+      return -1;
+    }
+
+    // Wait for a child to exit.
+    sleep(p, &wait_lock); // DOC: wait-sleep
+  }
 }
 
-void up_time()
+void update_time()
 {
   struct proc *p;
   for (p = proc; p < &proc[NPROC]; p++)
   {
     acquire(&p->lock);
     if (p->state == RUNNING)
-      p->running_time++;
-
+    {
+      p->rtime++;
+    }
     release(&p->lock);
   }
 }
+
+// this is my function

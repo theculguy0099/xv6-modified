@@ -27,7 +27,6 @@ void trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
-int val[4] = {1, 3, 9, 15};
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -80,50 +79,149 @@ void usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if (flag_schd == 0 || flag_schd == 3)
+  if (which_dev == 2)
   {
-    if (which_dev == 2)
+    printf("%d %d %d\n", ticks, p->pid, p->queue);
+    p->currentticks++;
+    if (p->currentticks % p->ticks == 0 && p->ishandler == 0)
+    {
+      p->pasttrapframe = kalloc();
+      p->ishandler = 1;
+      memmove(p->pasttrapframe, p->trapframe, PGSIZE);
+      // p->pasttrapframe = p->trapframe;
+      p->trapframe->epc = p->funcadr;
+      // sigreturn();
+    }
+
+#ifdef RR
+    yield();
+#endif
+#ifdef MLFQ
+    for (p = proc; p < &proc[NPROC]; p++)
     {
       acquire(&p->lock);
-      printf("%d %d %d\n", ticks, p->pid, p->queue_no);
-      release(&p->lock);
-      if (flag_schd == 3)
+      if (p->state == RUNNABLE)
       {
-        struct proc *p = myproc();
-        if ((ticks - p->qetime) > (val[p->queue_no]))
-        {
-          p->time_inside_queue[p->queue_no] += (ticks - p->qetime);
-          if (p->queue_no < 3)
-          {
-            p->queue_no++;
-            printf("%d %d %d\n", ticks, p->pid, p->queue_no);
-          }
-          p->qetime = ticks;
-          yield();
-        }
+        p->timeofwait++;
       }
-      else
+
+      release(&p->lock);
+    }
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      acquire(&p->lock);
+      if (p->state == RUNNING)
       {
+        p->sliceticks++;
+      }
+
+      release(&p->lock);
+    }
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->timeofwait >= 30 && p->queue > 0)
+      {
+        if (p->pid >= 9)
+        {
+          printf("%d %d %d\n", ticks - 1, p->pid, p->queue);
+        }
+        // if (p->queue > 0)
+        // {
+        p->queue--;
+        if (p->pid >= 9)
+        {
+          printf("%d %d %d\n", ticks, p->pid, p->queue);
+        }
+        // }
+        if (p->queue == 0)
+        {
+          p->slicetime = 1;
+        }
+        else if (p->queue == 1)
+        {
+          p->slicetime = 3;
+        }
+        else if (p->queue == 2)
+        {
+          p->slicetime = 9;
+        }
+        else if (p->queue == 3)
+        {
+          p->slicetime = 15;
+        }
+        // printf("%d %d %d\n", ticks, p->pid, p->queue);
+        p->sliceticks = 0;
+        p->timeofwait = 0;
+        p->flagforio = 0;
+      }
+    }
+    // struct proc *temp = p;
+
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->queue == 0 && p->queue < myproc()->queue)
+      {
+        myproc()->flagforio = 1;
+        // printf("YES\n");
         yield();
       }
     }
-  }
-
-  if (flag_schd != 3)
-  {
-    if (which_dev == 2)
+    for (p = proc; p < &proc[NPROC]; p++)
     {
-      p->curr_ticks++;
-      // printf("%d %d %d", p->till_tick, p->pid, p->current_queue_number);
-      if (!p->check_sig && p->time_length && p->curr_ticks >= p->time_length)
+      if (p->state == RUNNABLE && p->queue == 1 && p->queue < myproc()->queue)
       {
-        p->check_sig = 1;
-        p->curr_ticks = 0;
-        *(p->store_frame) = *(p->trapframe);
-        p->trapframe->epc = p->handler;
+        myproc()->flagforio = 1;
+        yield();
       }
+    }
+
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->queue == 2 && p->queue < myproc()->queue)
+      {
+        myproc()->flagforio = 1;
+        yield();
+      }
+    }
+
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->queue == 3 && p->queue < myproc()->queue)
+      {
+        myproc()->flagforio = 1;
+        yield();
+      }
+    }
+    p = myproc();
+    if (p->sliceticks == p->slicetime)
+    {
+      // printf("%d %d %d\n", ticks, p->pid, p->queue);
+      p->flagforio = 0;
+      if (p->queue < 3)
+
+        p->queue++;
+      if (p->pid >= 9)
+      {
+        printf("%d %d %d\n", ticks, p->pid, p->queue);
+      }
+      if (p->queue == 1)
+      {
+        p->slicetime = 3;
+      }
+      else if (p->queue == 2)
+      {
+        p->slicetime = 9;
+      }
+      else if (p->queue == 3)
+      {
+        p->slicetime = 15;
+      }
+      p->sliceticks = 0;
+      p->timeofwait = 0;
+      // p->new
       yield();
     }
+#endif
   }
 
   usertrapret();
@@ -196,28 +294,138 @@ void kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
-
-  if (flag_schd == 0 || flag_schd == 3)
+  if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
   {
-    if (which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
+    // printf("%d  %s %d %d\n", myproc()->pid, myproc()->name, myproc()->queue, ticks);
+
+#ifdef RR
+    yield();
+#endif
+    // struct proc *p;
+    // yield();
+#ifdef MLFQ
+#ifdef MLFQ
+    struct proc *p = 0;
+
+    for (p = proc; p < &proc[NPROC]; p++)
     {
-      if (flag_schd == 3)
+      acquire(&p->lock);
+      if (p->state == RUNNABLE)
       {
-        struct proc *p = myproc();
-        if ((ticks - p->qetime) > (val[p->queue_no]))
-        {
-          p->time_inside_queue[p->queue_no] += (ticks - p->qetime);
-          if (p->queue_no < 3)
-            p->queue_no++;
-          p->qetime = ticks;
-          yield();
-        }
+        p->timeofwait++;
       }
-      else
+      if (p->state == RUNNING)
       {
+        p->sliceticks++;
+      }
+      release(&p->lock);
+    }
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->timeofwait >= 30 && p->queue > 0)
+      {
+        if (p->pid >= 9)
+        {
+          printf("%d %d %d\n", ticks - 1, p->pid, p->queue);
+        }
+        // if (p->queue > 0)
+        // {
+        p->queue--;
+        if (p->pid >= 9)
+        {
+          printf("%d %d %d\n", ticks, p->pid, p->queue);
+        }
+        // }
+        if (p->queue == 0)
+        {
+          p->slicetime = 1;
+        }
+        else if (p->queue == 1)
+        {
+          p->slicetime = 3;
+        }
+        else if (p->queue == 2)
+        {
+          p->slicetime = 9;
+        }
+        else if (p->queue == 3)
+        {
+          p->slicetime = 15;
+        }
+        // printf("%d %d %d\n", ticks, p->pid, p->queue);
+        p->sliceticks = 0;
+        p->timeofwait = 0;
+        p->flagforio = 0;
+      }
+    }
+    // struct proc *temp = p;
+
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->queue == 0 && p->queue < myproc()->queue)
+      {
+        myproc()->flagforio = 1;
+        // printf("YES\n");
         yield();
       }
     }
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->queue == 1 && p->queue < myproc()->queue)
+      {
+        myproc()->flagforio = 1;
+        yield();
+      }
+    }
+
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->queue == 2 && p->queue < myproc()->queue)
+      {
+        myproc()->flagforio = 1;
+        yield();
+      }
+    }
+
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+      if (p->state == RUNNABLE && p->queue == 3 && p->queue < myproc()->queue)
+      {
+        myproc()->flagforio = 1;
+        yield();
+      }
+    }
+    p = myproc();
+    if (p->sliceticks == p->slicetime)
+    {
+      // printf("%d %d %d\n", ticks, p->pid, p->queue);
+      p->flagforio = 0;
+      if (p->queue < 3)
+
+        p->queue++;
+      if (p->pid >= 9)
+      {
+        printf("%d %d %d\n", ticks, p->pid, p->queue);
+      }
+      if (p->queue == 1)
+      {
+        p->slicetime = 3;
+      }
+      else if (p->queue == 2)
+      {
+        p->slicetime = 9;
+      }
+      else if (p->queue == 3)
+      {
+        p->slicetime = 15;
+      }
+      p->sliceticks = 0;
+      p->timeofwait = 0;
+      // p->new
+      yield();
+    }
+#endif
+#endif
   }
 
   // the yield() may have caused some traps to occur,
@@ -230,7 +438,21 @@ void clockintr()
 {
   acquire(&tickslock);
   ticks++;
-  up_time();
+  update_time();
+  // for (struct proc *p = proc; p < &proc[NPROC]; p++)
+  // {
+  //   acquire(&p->lock);
+  //   if (p->state == RUNNING)
+  //   {
+  //     printf("here");
+  //     p->rtime++;
+  //   }
+  //   // if (p->state == SLEEPING)
+  //   // {
+  //   //   p->wtime++;
+  //   // }
+  //   release(&p->lock);
+  // }
   wakeup(&ticks);
   release(&tickslock);
 }
